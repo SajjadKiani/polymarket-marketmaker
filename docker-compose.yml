@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-polymarket}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-polymarket}
+      POSTGRES_DB: ${POSTGRES_DB:-polymarket}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Bind to localhost only by default; remove if you want remote access.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-polymarket} -d ${POSTGRES_DB:-polymarket}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-marketmaker:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PG_URL: postgres://${POSTGRES_USER:-polymarket}:${POSTGRES_PASSWORD:-polymarket}@postgres:5432/${POSTGRES_DB:-polymarket}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PRETTY: ${LOG_PRETTY:-false}
+      UNDERLYING_SYMBOLS: ${UNDERLYING_SYMBOLS:-btcusdt,ethusdt,solusdt,xrpusdt,dogeusdt,bnbusdt}
+    command: ["ingest"]
+    # No exposed ports; orchestrator is outbound-only.
+
+  health:
+    image: polymarket-marketmaker:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      app:
+        condition: service_started
+    environment:
+      PG_URL: postgres://${POSTGRES_USER:-polymarket}:${POSTGRES_PASSWORD:-polymarket}@postgres:5432/${POSTGRES_DB:-polymarket}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_PRETTY: ${LOG_PRETTY:-false}
+      HEALTH_INTERVAL_SEC: ${HEALTH_INTERVAL_SEC:-86400}
+      HEALTH_WINDOW_HOURS: ${HEALTH_WINDOW_HOURS:-24}
+    command: ["health-cron"]
+
+volumes:
+  pgdata:

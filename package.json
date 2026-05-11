@@ -1,0 +1,35 @@
+{
+  "name": "polymarket-marketmaker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Polymarket maker-rebate measurement pipeline + backtester (Phase 1)",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "migrate": "tsx src/db/migrate.ts",
+    "ingest": "tsx src/ingest/orchestrator.ts",
+    "bt": "tsx src/backtest/cli.ts",
+    "smoke": "tsx scripts/smoke_5min.ts",
+    "health": "tsx scripts/health.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "pg": "^8.13.1",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
