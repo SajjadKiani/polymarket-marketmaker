@@ -65,20 +65,14 @@ export class UnderlyingWsClient {
       this.reconnectAttempt = 0;
       this.stateListener?.('open');
 
-      const binanceFilter = config.UNDERLYING_SYMBOLS.join(',');
-      const chainlinkFilter = JSON.stringify({
-        symbol: { $in: config.UNDERLYING_SYMBOLS.map((s) => s.replace(/usdt$/, '/usd')) },
-      });
-
+      // Server rejects CSV filters despite what the published docs say
+      // (regex requires JSON `[`/`{`). Empirically, subscribing without filters
+      // delivers all symbols, including the ones we care about — we filter
+      // client-side in handleMessage to avoid persisting noise.
       const sub = {
         action: 'subscribe',
         subscriptions: [
-          { topic: 'crypto_prices', type: 'update', filters: binanceFilter },
-          // Chainlink: filter shape is a JSON string. Some deployments expect a single
-          // symbol; we try a wildcard subscription as a robust fallback by also sending
-          // an unfiltered subscribe.
-          { topic: 'crypto_prices_chainlink', type: '*', filters: chainlinkFilter },
-          { topic: 'crypto_prices_chainlink', type: '*', filters: '' },
+          { topic: 'crypto_prices', type: 'update' },
         ],
       };
       try {
@@ -137,20 +131,37 @@ export class UnderlyingWsClient {
       const topic = String(obj.topic ?? '');
       if (topic !== 'crypto_prices' && topic !== 'crypto_prices_chainlink') continue;
 
+      const type = String(obj.type ?? '');
       const payload = (obj.payload ?? {}) as Record<string, unknown>;
       const symbol = String(payload.symbol ?? '').toLowerCase();
-      const value = Number(payload.value ?? payload.price ?? payload.last_price);
-      const tsMs = Number(payload.timestamp ?? obj.timestamp ?? Date.now());
-      if (!symbol || !Number.isFinite(value)) continue;
+      if (!symbol) continue;
+      if (!config.UNDERLYING_SYMBOLS.includes(symbol)) continue;
 
       const source = topic === 'crypto_prices' ? 'binance' : 'chainlink';
       const normalizedSymbol = source === 'chainlink' ? symbol.replace('/', '') : symbol;
-      this.listener({
-        symbol: normalizedSymbol,
-        source,
-        ts: tsMs < 1e12 ? Math.floor(tsMs * 1000) : Math.floor(tsMs),
-        price: value,
-      });
+
+      if (type === 'subscribe' && Array.isArray(payload.data)) {
+        // Batch snapshot sent right after subscribe. Each entry is { timestamp, value }.
+        for (const p of payload.data as Array<Record<string, unknown>>) {
+          const ts = normalizeTsMs(p.timestamp ?? obj.timestamp);
+          const value = Number(p.value ?? p.price);
+          if (!Number.isFinite(value)) continue;
+          this.listener({ symbol: normalizedSymbol, source, ts, price: value });
+        }
+        continue;
+      }
+
+      // Single tick: { topic, type=update, payload: { symbol, timestamp, value } }.
+      const ts = normalizeTsMs(payload.timestamp ?? obj.timestamp);
+      const value = Number(payload.value ?? payload.price ?? payload.last_price);
+      if (!Number.isFinite(value)) continue;
+      this.listener({ symbol: normalizedSymbol, source, ts, price: value });
     }
   }
+}
+
+function normalizeTsMs(v: unknown): number {
+  const n = typeof v === 'string' ? Number(v) : (v as number);
+  if (!Number.isFinite(n)) return Date.now();
+  return n < 1e12 ? Math.floor(n * 1000) : Math.floor(n);
 }
