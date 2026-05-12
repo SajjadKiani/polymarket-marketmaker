@@ -13,10 +13,20 @@ export interface UnderlyingTick {
 type Listener = (t: UnderlyingTick) => void;
 type StateListener = (event: 'open' | 'close', detail?: unknown) => void;
 
-// Polymarket Real-Time Data Socket (ws-live-data). Exposes Binance and Chainlink
-// price streams. The subscription shape isn't tightly documented in the public docs
-// we have access to; we send a best-effort subscribe for each configured symbol and
-// also tolerate the server pushing without an explicit subscribe.
+// Polymarket Real-Time Data Socket. The protocol (per docs/market-data/websocket/rtds):
+//   {
+//     "action": "subscribe",
+//     "subscriptions": [{ "topic": "crypto_prices", "type": "update", "filters": "btcusdt,ethusdt" }]
+//   }
+//
+// Server emits:
+//   { "topic": "crypto_prices", "type": "update", "timestamp": <ms>,
+//     "payload": { "symbol": "btcusdt", "timestamp": <ms>, "value": 67234.50 } }
+//
+// PING every 5s. Both Binance (`crypto_prices`, lowercase symbols like btcusdt) and
+// Chainlink (`crypto_prices_chainlink`, slash symbols like btc/usd) are supported.
+// We subscribe to both. Chainlink is authoritative for 15-min market resolution;
+// Binance is a denser feed used for monitoring.
 export class UnderlyingWsClient {
   private ws: WebSocket | null = null;
   private pingTimer: NodeJS.Timeout | null = null;
@@ -54,25 +64,29 @@ export class UnderlyingWsClient {
     ws.on('open', () => {
       this.reconnectAttempt = 0;
       this.stateListener?.('open');
-      // Best-effort subscription. Two shapes we cover:
-      // 1) { type: "subscribe", topic: "crypto_prices", symbols: [...] }
-      // 2) Per-symbol: { action: "subscribe", channel: "ticker", symbol: "btcusdt" }
-      for (const sym of config.UNDERLYING_SYMBOLS) {
-        const msg = { action: 'subscribe', channel: 'crypto_prices', symbol: sym };
-        try {
-          ws.send(JSON.stringify(msg));
-        } catch {
-          /* ignore */
-        }
-      }
+
+      const binanceFilter = config.UNDERLYING_SYMBOLS.join(',');
+      const chainlinkFilter = JSON.stringify({
+        symbol: { $in: config.UNDERLYING_SYMBOLS.map((s) => s.replace(/usdt$/, '/usd')) },
+      });
+
+      const sub = {
+        action: 'subscribe',
+        subscriptions: [
+          { topic: 'crypto_prices', type: 'update', filters: binanceFilter },
+          // Chainlink: filter shape is a JSON string. Some deployments expect a single
+          // symbol; we try a wildcard subscription as a robust fallback by also sending
+          // an unfiltered subscribe.
+          { topic: 'crypto_prices_chainlink', type: '*', filters: chainlinkFilter },
+          { topic: 'crypto_prices_chainlink', type: '*', filters: '' },
+        ],
+      };
       try {
-        ws.send(
-          JSON.stringify({ type: 'subscribe', topic: 'crypto_prices', symbols: config.UNDERLYING_SYMBOLS }),
-        );
-      } catch {
-        /* ignore */
+        ws.send(JSON.stringify(sub));
+      } catch (e) {
+        log.warn({ err: e }, 'ws_underlying subscribe failed');
       }
-      // PING cadence: docs suggest 5s for the live-data socket.
+
       this.pingTimer = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           try {
@@ -86,7 +100,7 @@ export class UnderlyingWsClient {
 
     ws.on('message', (raw) => {
       const text = raw.toString();
-      if (text === 'PONG') return;
+      if (text === 'PONG' || text === 'pong') return;
       try {
         this.handleMessage(text);
       } catch (e) {
@@ -120,18 +134,23 @@ export class UnderlyingWsClient {
     for (const item of items) {
       if (!item || typeof item !== 'object') continue;
       const obj = item as Record<string, unknown>;
-      const symbol = String(obj.symbol ?? obj.s ?? obj.asset ?? '').toLowerCase();
-      const source = String(obj.source ?? obj.exchange ?? 'binance').toLowerCase();
-      const ts = normalizeTs(obj.timestamp ?? obj.ts ?? obj.t ?? Date.now());
-      const price = Number(obj.price ?? obj.p ?? obj.last_price);
-      if (!symbol || !Number.isFinite(price)) continue;
-      this.listener({ symbol, source, ts, price });
+      const topic = String(obj.topic ?? '');
+      if (topic !== 'crypto_prices' && topic !== 'crypto_prices_chainlink') continue;
+
+      const payload = (obj.payload ?? {}) as Record<string, unknown>;
+      const symbol = String(payload.symbol ?? '').toLowerCase();
+      const value = Number(payload.value ?? payload.price ?? payload.last_price);
+      const tsMs = Number(payload.timestamp ?? obj.timestamp ?? Date.now());
+      if (!symbol || !Number.isFinite(value)) continue;
+
+      const source = topic === 'crypto_prices' ? 'binance' : 'chainlink';
+      const normalizedSymbol = source === 'chainlink' ? symbol.replace('/', '') : symbol;
+      this.listener({
+        symbol: normalizedSymbol,
+        source,
+        ts: tsMs < 1e12 ? Math.floor(tsMs * 1000) : Math.floor(tsMs),
+        price: value,
+      });
     }
   }
-}
-
-function normalizeTs(v: unknown): number {
-  const n = typeof v === 'string' ? Number(v) : (v as number);
-  if (!Number.isFinite(n)) return Date.now();
-  return n < 1e12 ? Math.floor(n * 1000) : Math.floor(n);
 }

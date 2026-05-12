@@ -31,6 +31,8 @@ export interface RunResult {
   grossRebateUsd: number;
   inventoryPnlUsd: number;
   netPnlUsd: number;
+  skippedUnknownOutcome: number;
+  marketsEligible: number;
 }
 
 interface RunOptions {
@@ -48,10 +50,15 @@ export async function runBacktest(opts: RunOptions): Promise<RunResult> {
   let totalFills = 0;
   let totalRebate = 0;
   let totalInvPnl = 0;
+  let skipped = 0;
 
   for (const m of markets) {
     try {
       const r = await runOneMarket(m, opts.strategy);
+      if (r === 'unknown') {
+        skipped++;
+        continue;
+      }
       results.push(r);
       totalFills += r.fills;
       totalRebate += r.rebateUsd;
@@ -61,7 +68,17 @@ export async function runBacktest(opts: RunOptions): Promise<RunResult> {
     }
   }
   const net = totalRebate + totalInvPnl;
-  log.info({ totalFills, totalRebate, totalInvPnl, net }, 'backtest done');
+  log.info(
+    {
+      totalFills,
+      totalRebate,
+      totalInvPnl,
+      net,
+      skipped,
+      eligible: results.length,
+    },
+    'backtest done',
+  );
 
   return {
     capitalUsd: opts.capitalUsd,
@@ -70,10 +87,12 @@ export async function runBacktest(opts: RunOptions): Promise<RunResult> {
     grossRebateUsd: totalRebate,
     inventoryPnlUsd: totalInvPnl,
     netPnlUsd: net,
+    skippedUnknownOutcome: skipped,
+    marketsEligible: results.length,
   };
 }
 
-async function runOneMarket(m: MarketMeta, strategy: Strategy): Promise<MarketResult> {
+async function runOneMarket(m: MarketMeta, strategy: Strategy): Promise<MarketResult | 'unknown'> {
   const yesBook = new Book(m.yesTokenId);
   const noBook = new Book(m.noTokenId);
   const inv: Inventory = emptyInventory();
@@ -138,13 +157,14 @@ async function runOneMarket(m: MarketMeta, strategy: Strategy): Promise<MarketRe
     }
   }
 
-  // Settle inventory at resolution.
+  // Settle inventory at resolution. If we can't resolve, skip — silently zeroing
+  // positions for UNKNOWN markets is what produced the bogus +$31k P&L in v1.
   const outcome = await resolveOutcome(m);
-  // Inventory P&L = settlement value of held shares minus cash spent acquiring them
-  // plus cash received from sells. We tracked cashUsd as we filled; settle() adds
-  // settlement value to cashUsd. Final cash = invPnl.
-  const invPnlContribution = settleInventory(inv, outcome);
-  void invPnlContribution;
+  if (outcome === 'UNKNOWN') {
+    log.debug({ cid: m.conditionId }, 'skipping market: no underlying resolution');
+    return 'unknown';
+  }
+  settleInventory(inv, outcome);
   const invPnl = inv.cashUsd;
 
   const rebate = await computeMarketRebate(

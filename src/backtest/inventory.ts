@@ -8,9 +8,6 @@ export function emptyInventory(): Inventory {
   return { yesShares: 0, noShares: 0, cashUsd: 0 };
 }
 
-// Apply a fill to inventory. Maker BUY at price p costs p USDC per share, gains 1 share.
-// Maker SELL at price p receives p USDC per share, loses 1 share. We allow negative
-// share balances (synthetic short via the complement token won't be modeled in v1).
 export function applyFill(inv: Inventory, f: Fill, m: MarketMeta): void {
   const isYes = f.tokenId === m.yesTokenId;
   const shareDelta = f.side === 'BUY' ? f.size : -f.size;
@@ -22,8 +19,8 @@ export function applyFill(inv: Inventory, f: Fill, m: MarketMeta): void {
 
 export type Outcome = 'YES' | 'NO' | 'UNKNOWN';
 
-// Resolve the market by looking up underlying spot at slot_start and slot_end.
-// YES wins iff close > open. We use the closest underlying tick to each boundary.
+// Resolve via underlying spot at slot_start and slot_end. Chainlink is preferred
+// (matches the actual resolution source) but Binance is accepted as a fallback.
 export async function resolveOutcome(m: MarketMeta): Promise<Outcome> {
   if (!m.underlying) return 'UNKNOWN';
   const symbol = `${m.underlying.toLowerCase()}usdt`;
@@ -39,7 +36,9 @@ async function closestPrice(symbol: string, at: Date): Promise<number | null> {
     `SELECT price::text FROM underlying_prices
      WHERE symbol = $1 AND ts BETWEEN $2::timestamptz - interval '60 seconds'
                                  AND $2::timestamptz + interval '60 seconds'
-     ORDER BY abs(extract(epoch FROM ts - $2::timestamptz))
+     ORDER BY
+       CASE WHEN source = 'chainlink' THEN 0 ELSE 1 END,
+       abs(extract(epoch FROM ts - $2::timestamptz))
      LIMIT 1`,
     [symbol, at],
   );
@@ -48,9 +47,14 @@ async function closestPrice(symbol: string, at: Date): Promise<number | null> {
   return Number.isFinite(v) ? v : null;
 }
 
-// Settle held shares at the resolved outcome and roll the proceeds into cashUsd.
-// YES shares pay $1 if outcome=YES, $0 otherwise; NO shares pay $1 if outcome=NO.
+// Settle. Returns the settlement cash delta.
+// IMPORTANT: callers MUST handle outcome='UNKNOWN' as "skip this market" — do not
+// invoke settleInventory at all in that case, otherwise positions silently vanish
+// and shorts retain the proceeds with no offsetting liability.
 export function settleInventory(inv: Inventory, outcome: Outcome): number {
+  if (outcome === 'UNKNOWN') {
+    throw new Error('settleInventory called with UNKNOWN; caller must skip');
+  }
   let pnl = 0;
   if (outcome === 'YES') pnl += inv.yesShares * 1.0;
   if (outcome === 'NO') pnl += inv.noShares * 1.0;
@@ -59,4 +63,3 @@ export function settleInventory(inv: Inventory, outcome: Outcome): number {
   inv.noShares = 0;
   return pnl;
 }
-

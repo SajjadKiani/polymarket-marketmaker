@@ -62,16 +62,27 @@ export async function persistRun(
 }
 
 export function printSummary(result: RunResult, strategy: Strategy, from: Date, to: Date): void {
+  const total = result.marketsEligible + result.skippedUnknownOutcome;
+  const skippedPct = total > 0 ? (100 * result.skippedUnknownOutcome) / total : 0;
   const lines: string[] = [];
   lines.push('');
   lines.push(`backtest: strategy=${strategy.name}`);
   lines.push(`window:   ${from.toISOString()} → ${to.toISOString()}`);
   lines.push(`capital:  $${result.capitalUsd.toFixed(2)}`);
-  lines.push(`markets:  ${result.markets.length}`);
+  lines.push(
+    `markets:  ${result.marketsEligible} eligible / ${result.skippedUnknownOutcome} skipped ` +
+      `(${skippedPct.toFixed(1)}% missing underlying)`,
+  );
   lines.push(`fills:    ${result.fills}`);
   lines.push(`gross rebate:  $${result.grossRebateUsd.toFixed(4)}`);
   lines.push(`inventory P&L: $${result.inventoryPnlUsd.toFixed(4)}`);
   lines.push(`NET P&L:       $${result.netPnlUsd.toFixed(4)}`);
+  if (skippedPct > 5) {
+    lines.push('');
+    lines.push(`WARNING: ${skippedPct.toFixed(1)}% of markets were skipped due to missing`);
+    lines.push('  underlying-price data. Headline numbers may be unrepresentative.');
+    lines.push('  Backfill underlying_prices (scripts/backfill_binance.ts) and re-run.');
+  }
   lines.push('');
   lines.push('caveat: queue-position fill model assumes zero quote latency and');
   lines.push('  no adverse selection. Subtract ~30% from headline net P&L as a');
