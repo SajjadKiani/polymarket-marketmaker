@@ -142,11 +142,38 @@ export class MarketWsClient {
       if (!item || typeof item !== 'object') continue;
       const obj = item as Record<string, unknown>;
       const type = (obj.event_type ?? obj.type ?? '').toString();
-      const tokenId = (obj.asset_id ?? obj.token_id ?? '').toString();
       const tsRaw = obj.timestamp ?? obj.ts ?? obj.match_time ?? Date.now();
       const ts = normalizeTs(tsRaw);
-      const seq = this.seq(obj);
 
+      // price_change carries asset_id per-entry inside price_changes[], not at the
+      // top level, and one payload can update multiple tokens. Handle before the
+      // top-level tokenId guard.
+      if (type === 'price_change' || type === 'book_update' || type === 'level_update') {
+        const changes = (obj.changes ?? obj.price_changes ?? []) as Array<Record<string, unknown>>;
+        for (const c of Array.isArray(changes) ? changes : []) {
+          const childTokenId = (c.asset_id ?? c.token_id ?? obj.asset_id ?? obj.token_id ?? '').toString();
+          if (!childTokenId) continue;
+          const sideStr = (c.side ?? c.s ?? '').toString().toUpperCase();
+          const side: 0 | 1 = sideStr === 'BUY' || sideStr === 'BID' || sideStr === '0' ? 0 : 1;
+          const price = Number(c.price ?? c.p);
+          const size = Number(c.size ?? c.sz ?? c.quantity ?? 0);
+          if (!Number.isFinite(price)) continue;
+          const ev: DeltaEvent = {
+            kind: 'delta',
+            tokenId: childTokenId,
+            ts,
+            seq: this.seq(obj),
+            side,
+            price,
+            size: Number.isFinite(size) ? size : 0,
+          };
+          this.listener(ev);
+        }
+        continue;
+      }
+
+      const tokenId = (obj.asset_id ?? obj.token_id ?? '').toString();
+      const seq = this.seq(obj);
       if (!tokenId && type !== 'pong') continue;
 
       if (type === 'book' || type === 'orderbook') {
@@ -162,28 +189,6 @@ export class MarketWsClient {
           reason: 'initial_dump',
         };
         this.listener(ev);
-        continue;
-      }
-
-      if (type === 'price_change' || type === 'book_update' || type === 'level_update') {
-        const changes = (obj.changes ?? obj.price_changes ?? []) as Array<Record<string, unknown>>;
-        for (const c of Array.isArray(changes) ? changes : []) {
-          const sideStr = (c.side ?? c.s ?? '').toString().toUpperCase();
-          const side: 0 | 1 = sideStr === 'BUY' || sideStr === 'BID' || sideStr === '0' ? 0 : 1;
-          const price = Number(c.price ?? c.p);
-          const size = Number(c.size ?? c.sz ?? c.quantity ?? 0);
-          if (!Number.isFinite(price)) continue;
-          const ev: DeltaEvent = {
-            kind: 'delta',
-            tokenId,
-            ts,
-            seq: this.seq(obj),
-            side,
-            price,
-            size: Number.isFinite(size) ? size : 0,
-          };
-          this.listener(ev);
-        }
         continue;
       }
 
